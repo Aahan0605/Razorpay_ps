@@ -37,6 +37,8 @@ if _env.exists():
 
 MODEL = "claude-opus-5"
 ACTIONS = ["auto_block", "hold_for_review", "auto_clear"]
+# caution ordering: the verifier may move UP this scale, never down
+CAUTION = {"auto_clear": 0, "hold_for_review": 1, "auto_block": 2}
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -101,6 +103,20 @@ def _band(score: float) -> str:
     return "auto_block" if score >= 0.85 else "hold_for_review" if score >= 0.30 else "auto_clear"
 
 
+def clamp_action(llm_action: str, band: str) -> tuple[str, bool]:
+    """Enforce the band floor in code, not just in the prompt.
+
+    The system prompt asks the verifier to stay inside its band, but a prompt is a
+    request, not a guarantee -- and the one direction that must never happen is the
+    model talking us DOWN from a block. Returns (action, was_clamped).
+    """
+    if llm_action not in CAUTION:
+        return band, True
+    if CAUTION[llm_action] < CAUTION[band]:
+        return band, True
+    return llm_action, False
+
+
 def _row(r) -> dict:
     return {
         "txn_id": r.txn_id,
@@ -163,20 +179,38 @@ def verify(txn_id: str):
 
     import anthropic
 
-    resp = anthropic.Anthropic().messages.create(
-        model=MODEL,
-        max_tokens=1500,
-        system=SYSTEM,
-        output_config={"format": {"type": "json_schema", "schema": VERDICT_SCHEMA}},
-        messages=[{"role": "user", "content": json.dumps(payload, indent=2)}],
-    )
+    try:
+        resp = anthropic.Anthropic().messages.create(
+            model=MODEL,
+            max_tokens=1500,
+            system=SYSTEM,
+            output_config={"format": {"type": "json_schema", "schema": VERDICT_SCHEMA}},
+            messages=[{"role": "user", "content": json.dumps(payload, indent=2)}],
+        )
+    except anthropic.APIStatusError as e:
+        # surface the real reason (bad key, no credits, rate limit) instead of a 500
+        raise HTTPException(502, f"Anthropic API error {e.status_code}: {_reason(e)}")
+    except anthropic.APIConnectionError:
+        raise HTTPException(504, "could not reach the Anthropic API")
+
     if resp.stop_reason == "refusal":
         raise HTTPException(502, "verifier declined this request")
 
     verdict = json.loads(next(b.text for b in resp.content if b.type == "text"))
+    verdict["recommended_action"], clamped = clamp_action(
+        verdict.get("recommended_action"), _band(score)
+    )
+    verdict["band_clamped"] = clamped
     verdict["model"] = MODEL
     _verdicts[txn_id] = verdict
     return verdict
+
+
+def _reason(e) -> str:
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        return body.get("error", {}).get("message", str(e))
+    return str(e)
 
 
 def _fmt(v):

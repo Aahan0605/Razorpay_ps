@@ -58,11 +58,17 @@ flowchart TB
 
 Two boundaries in that diagram are load-bearing.
 
-**The verifier is fenced in.** It receives the transaction, its behavioural features, the
-model's probability, and **the action band that score falls into**. It may escalate caution
-(recommend `hold_for_review` where the band allows `auto_clear`) but it cannot recommend a
-less cautious action than the classifier's score permits. The LLM explains and advises; it
-does not get to overrule the model downward.
+**The verifier is fenced in — in code, not just in the prompt.** It receives the
+transaction, its behavioural features, the model's probability, and **the action band that
+score falls into**. It may escalate caution (recommend `hold_for_review` where the band
+allows `auto_clear`), but a recommendation *below* the band floor is overridden server-side
+by `clamp_action()` in `backend/main.py` and the response is tagged `band_clamped: true`.
+An unrecognised or hallucinated action falls back to the band.
+
+This matters because a system prompt is a request, not a guarantee, and the one direction
+that costs real money is a model talking you *down* from a block. `backend/test_verify.py`
+asserts the floor holds across escalation, de-escalation, and malformed actions. The LLM
+explains and advises; it cannot overrule the classifier downward.
 
 **This system scores risk; it does not authenticate.** The dashed boxes are things that
 would consume this signal, not things built here — see the next section for why that
