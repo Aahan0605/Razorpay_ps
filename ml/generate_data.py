@@ -104,6 +104,17 @@ def _legit(rng, cust):
     # 3. genuine big-ticket purchases
     big = rng.random(n) < 0.01
     df.loc[big, "amount"] *= rng.uniform(4, 12, big.sum())
+    # 4. the honest false positives: new phone + abroad + big spend at once,
+    #    i.e. indistinguishable from account takeover on the features we have.
+    #    Without these the review queue is empty and precision is fiction.
+    ato_lookalike = rng.random(n) < 0.012
+    k = ato_lookalike.sum()
+    df.loc[ato_lookalike, "device_id"] = [f"dev_up_{i}" for i in rng.integers(0, 99999, k)]
+    df.loc[ato_lookalike, "ip_country"] = rng.choice(["US", "AE", "GB", "SG"], k)
+    df.loc[ato_lookalike, "amount"] *= rng.uniform(3, 9, k)
+    df.loc[ato_lookalike, "merchant_category"] = rng.choice(
+        ["electronics", "travel", "gift_cards"], k)
+    df.loc[ato_lookalike, "failed_attempts"] = rng.binomial(2, 0.3, k)
     return df
 
 
@@ -113,7 +124,7 @@ def _fraud(rng, cust, n_target):
     victims = cust.sample(n_target, random_state=SEED, replace=True).reset_index(drop=True)
     # archetype mix: card testing bursts are the most common in payments
     kind = rng.choice(["card_testing", "ato", "stolen_card", "slow_drain"],
-                      n_target, p=[0.34, 0.28, 0.26, 0.12])
+                      n_target, p=[0.28, 0.24, 0.22, 0.26])
 
     for i, v in victims.iterrows():
         k = kind[i]
@@ -121,6 +132,11 @@ def _fraud(rng, cust, n_target):
         base = dict(customer_id=v.customer_id, billing_country=v.home_country,
                     email_domain=v.email_domain, signup_offset=v.signup_offset,
                     is_fraud=1)
+
+        # a careful fraudster proxies through the victim's own geo and device.
+        # ~30% of episodes, so geo/device mismatch is a useful signal but never
+        # a giveaway -- otherwise the model just memorises "RU => fraud".
+        careful = rng.random() < 0.30
 
         if k == "card_testing":
             # rapid low-value probes across many merchants, new device, declines
@@ -131,14 +147,14 @@ def _fraud(rng, cust, n_target):
                     "payment_method": "card",
                     "merchant_category": rng.choice(["gaming", "subscription", "gift_cards"]),
                     "merchant_id": f"mch_{rng.integers(0, 2500):04d}",
-                    "device_id": f"dev_bot_{rng.integers(0, 999)}",
-                    "ip_country": rng.choice(["RU", "NG", "US"]),
-                    "failed_attempts": int(rng.integers(1, 5))})
+                    "device_id": v.device_id if careful else f"dev_bot_{rng.integers(0, 999)}",
+                    "ip_country": v.home_country if careful else rng.choice(["RU", "NG", "US"]),
+                    "failed_attempts": int(rng.integers(0, 2) if careful else rng.integers(1, 5))})
 
         elif k == "ato":
             # known customer, new device + new geo, drains upward
-            dev = f"dev_ato_{rng.integers(0, 9999)}"
-            ipc = rng.choice(["RU", "NG", "AE", "US"])
+            dev = v.device_id if careful else f"dev_ato_{rng.integers(0, 9999)}"
+            ipc = v.home_country if careful else rng.choice(["RU", "NG", "AE", "US"])
             for j in range(rng.integers(2, 5)):
                 rows.append({**base,
                     "timestamp": t0 + pd.Timedelta(hours=float(j * rng.uniform(0.2, 2))),
