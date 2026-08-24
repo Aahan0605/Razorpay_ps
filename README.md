@@ -78,6 +78,95 @@ actually costs.
 | `backend/main.py` | FastAPI: scored feed + Claude verifier |
 | `frontend/` | React + Tailwind dashboard |
 
+## Why this matters for Razorpay
+
+Four reasons the specific engineering choices here map onto real gaps, rather than being
+generic ML hygiene.
+
+### 1. Risk-based authentication now has a deadline — and it names these exact features
+
+The [RBI (Authentication Mechanisms for Digital Payment Transactions) Directions, 2025](https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=12898&Mode=0)
+(circular RBI/2025-26/79, issued 25 September 2025) take effect **1 April 2026** for all
+payment system providers and participants, with a further deadline of 1 October 2026 for
+validating non-recurring cross-border card-not-present transactions. They require at least
+two authentication factors, one of which must be dynamic.
+
+**Be precise about what this directive does and does not govern: it regulates
+*authentication*, not fraud scoring.** Nothing in it obliges anyone to run a fraud model,
+and nothing in this repo is a compliance claim. What it does is make *risk-based*
+authentication explicitly permissible — Section 8 allows issuers to
+
+> "identify transactions for evaluation against behavioural / contextual parameters such as
+> transaction location, user behaviour patterns, device attributes, historical transaction
+> profile, etc."
+
+That clause names four categories, and they are almost exactly this feature set:
+transaction location (`ip_country`, `ip_billing_mismatch`), user behaviour patterns
+(`txns_1h`, `txns_24h`, `distinct_merchants_24h`), device attributes (`is_new_device`,
+`devices_seen_prior`), and historical transaction profile (`amount_vs_trailing_mean`,
+`customer_age_days`). A routine payment from a known device clears with minimal friction;
+an unfamiliar device-plus-location combination is what pushes the score into a higher band.
+
+**This is where the causal-features fix stops being academic.** A step-up decision is made
+*at authorization time*, with only the past available. A velocity feature computed with a
+whole-dataset `groupby` is not merely optimistic on paper — it is unimplementable, because
+the data it depends on does not exist yet when the decision must be made. The leak test is
+what makes these features deployable rather than just accurate in a notebook.
+
+The cost-weighted threshold is the other half: a step-up decision needs a *graded* signal,
+not a binary flag, which is why the three bands exist. **This system supplies the risk
+signal that a compliant AFA engine would consume — it is not itself an AFA implementation.**
+
+### 2. UPI is a push rail, so there is no chargeback to fall back on
+
+UPI carried [83.4% of India's digital payment ecosystem volume in FY25](https://www.business-standard.com/finance/news/upi-s-contribution-to-payments-ecosystem-volume-grows-to-83-4-in-fy25-125052900871_1.html),
+rising to [85.5% in H2 2025](https://www.ibef.org/news/upi-accounted-for-85-5-of-digital-transaction-volume-in-h2-2025-rbi-report).
+It is a *push* mechanism: the customer sends funds, and there is no card-network chargeback
+rail to reverse them. Recovery means freezing the beneficiary account before the money is
+cashed out — a race measured in minutes.
+
+This changes what detection is worth. Catching card fraud at T+1 produces a chargeback;
+catching UPI fraud at T+1 often produces nothing but a write-off. **Post-hoc detection is worth
+dramatically less than pre-authorization scoring on this rail**, which is why the model
+scores from strictly-prior features before authorization, and why `auto_block` exists as a
+distinct action rather than routing everything to human review. Review latency is only
+affordable on the middle band — on the top band the money is already gone by the time an
+analyst opens the queue.
+
+### 3. False-positive rate is a business KPI, not an accuracy footnote
+
+Razorpay's own framing on the [Vulcan launch](https://www.dqindia.com/news/razorpay-vulcan-8x-fraud-detection-baseline-12398348)
+is instructive: the headline is 5× more fraudulent or disputed transactions identified
+**without increasing the number of alerts**. Holding alert volume constant *is* the
+false-positive framing — it is the constraint the capability gain is measured against.
+
+So the dashboard puts **good traffic held (0.17%)** next to precision and recall as a
+first-class number, and the README publishes the full threshold curve instead of one
+flattering F1. At a 0.76% base rate and Razorpay's volumes, 0.17% of good traffic is a
+large absolute count of real customers being made to wait.
+
+This is also why the first trained model was rejected rather than shipped. It scored
+P 0.986 / R 0.953 with 2 false positives in 14,000 — which was a data artifact, not a
+result, and which would have left the `hold_for_review` band decorative. A fraud system
+with no false positives has no review queue, and a review queue is the thing the LLM
+verifier exists to serve.
+
+### 4. Cross-merchant rings are the real gap, and this design cannot see them
+
+Every velocity feature here is **per customer, at one merchant**. A fraud ring that hits
+200 unrelated merchants once each looks like 200 unremarkable first-time transactions —
+`txns_1h` is 0 for all of them. The blind spot is structural, not a tuning problem.
+
+This is precisely the gap [Vulcan](https://press.aboutamazon.com/aws-international/2026/8/razorpay-launches-vulcan-indias-first-ai-payments-foundation-model-fueled-by-nvidia-and-aws-re-architecting-payments-for-a-350-bn-e-comm-future-by-2030)
+is built to close: trained across Razorpay's entire network rather than on any single
+merchant's data, it can identify a compromised card the moment it surfaces at multiple
+unrelated merchants — before any individual seller has enough data to flag the pattern.
+
+The honest positioning is that these are complementary layers, not competitors.
+Single-transaction scoring with a human-readable explanation is the merchant-side layer;
+network-view ring detection sits above it and sees what no single merchant can. This repo
+builds the former and is explicit about not attempting the latter.
+
 ## Data
 
 **A purpose-built synthetic generator, not IEEE-CIS or the ULB credit-card set.**
