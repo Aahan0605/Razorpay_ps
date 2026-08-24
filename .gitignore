@@ -12,7 +12,6 @@ venv/
 # Data & models (regenerate with `python ml/generate_data.py` / `python ml/train.py`)
 data/
 models/
-!models/metrics.json   # eval results are versioned; checkpoints are not
 
 # Node
 node_modules/
@@ -23,3 +22,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Local tooling config
+.claude/
