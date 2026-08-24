@@ -1,8 +1,8 @@
-"""FastAPI service: model scores every transaction, Claude explains the flagged ones.
+"""FastAPI service: model scores every transaction, Gemini explains the flagged ones.
 
 Two endpoints back the dashboard:
   GET  /transactions      the scored feed (held-out test set, replayed)
-  POST /verify/{txn_id}   Claude's plain-language explanation + bounded action
+  POST /verify/{txn_id}   Gemini's plain-language explanation + bounded action
 
 The verifier is deliberately constrained: it picks from three actions and cannot
 invent a fourth, and the action band is derived from the model score rather than
@@ -35,7 +35,8 @@ if _env.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-MODEL = "claude-opus-5"
+MODEL = "gemini-3.6-flash"
+_genai_client = None  # constructed lazily, once -- see verify() below
 ACTIONS = ["auto_block", "hold_for_review", "auto_clear"]
 # caution ordering: the verifier may move UP this scale, never down
 CAUTION = {"auto_clear": 0, "hold_for_review": 1, "auto_block": 2}
@@ -57,7 +58,7 @@ VERDICT_SCHEMA = {
         },
     },
     "required": ["explanation", "recommended_action", "confidence", "key_signals"],
-    "additionalProperties": False,
+    # no "additionalProperties" -- Gemini's schema subset rejects the key outright
 }
 
 SYSTEM = """You are a fraud-risk analyst reviewing transactions that an ML classifier \
@@ -160,8 +161,8 @@ def verify(txn_id: str):
         raise HTTPException(404, f"{txn_id} not in the scored feed")
     row, score = match.iloc[0], float(match.iloc[0].score)
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(503, "ANTHROPIC_API_KEY not set -- copy .env.example to .env")
+    if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+        raise HTTPException(503, "GEMINI_API_KEY not set -- copy .env.example to .env")
 
     raw = _raw_by_id.loc[txn_id]
     payload = {
@@ -177,26 +178,37 @@ def verify(txn_id: str):
         "allowed_action_for_this_band": _band(score),
     }
 
-    import anthropic
+    from google import genai
+    from google.genai import errors as genai_errors
+    from google.genai import types as genai_types
+
+    global _genai_client
+    if _genai_client is None:
+        # a nameless genai.Client() is GC'd mid-request -- its httpx client's
+        # __del__ closes the connection out from under the in-flight call. Keep
+        # one named, process-lifetime client instead of constructing per-request.
+        _genai_client = genai.Client()
 
     try:
-        resp = anthropic.Anthropic().messages.create(
+        resp = _genai_client.models.generate_content(
             model=MODEL,
-            max_tokens=1500,
-            system=SYSTEM,
-            output_config={"format": {"type": "json_schema", "schema": VERDICT_SCHEMA}},
-            messages=[{"role": "user", "content": json.dumps(payload, indent=2)}],
+            contents=json.dumps(payload, indent=2),
+            config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM,
+                response_mime_type="application/json",
+                response_schema=VERDICT_SCHEMA,
+            ),
         )
-    except anthropic.APIStatusError as e:
-        # surface the real reason (bad key, no credits, rate limit) instead of a 500
-        raise HTTPException(502, f"Anthropic API error {e.status_code}: {_reason(e)}")
-    except anthropic.APIConnectionError:
-        raise HTTPException(504, "could not reach the Anthropic API")
+    except genai_errors.APIError as e:
+        # surface the real reason (bad key, quota, rate limit) instead of a 500
+        raise HTTPException(502, f"Gemini API error {e.code}: {e.message}")
 
-    if resp.stop_reason == "refusal":
-        raise HTTPException(502, "verifier declined this request")
+    if not resp.text:
+        # blocked by a safety filter -- candidates[0].finish_reason explains why
+        reason = resp.candidates[0].finish_reason if resp.candidates else "unknown"
+        raise HTTPException(502, f"verifier returned no content (finish_reason={reason})")
 
-    verdict = json.loads(next(b.text for b in resp.content if b.type == "text"))
+    verdict = json.loads(resp.text)
     verdict["recommended_action"], clamped = clamp_action(
         verdict.get("recommended_action"), _band(score)
     )
@@ -204,13 +216,6 @@ def verify(txn_id: str):
     verdict["model"] = MODEL
     _verdicts[txn_id] = verdict
     return verdict
-
-
-def _reason(e) -> str:
-    body = getattr(e, "body", None)
-    if isinstance(body, dict):
-        return body.get("error", {}).get("message", str(e))
-    return str(e)
 
 
 def _fmt(v):
