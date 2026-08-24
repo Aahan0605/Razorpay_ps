@@ -26,29 +26,48 @@ This project routes that middle band to an LLM reviewer instead of forcing a bin
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[Transaction events<br/>synthetic generator] --> B[Causal feature pipeline<br/>ml/features.py]
-    B --> C[HistGradientBoosting<br/>classifier]
-    C --> D{Fraud score}
-    D -->|>= 0.85| E[auto_block]
-    D -->|0.30 - 0.85| F[hold_for_review]
-    D -->|< 0.30| G[auto_clear]
-    E --> H[Claude verifier<br/>explain + recommend]
-    F --> H
-    G --> H
-    H --> I[FastAPI<br/>/transactions /verify /metrics]
-    I --> J[React dashboard]
+flowchart TB
+    subgraph BUILT["Built in this repo"]
+        A["Transaction events"] --> B["Causal feature pipeline<br/>device / location / velocity / history"]
+        B --> C["Gradient-boosted classifier"]
+        C --> D{"Cost-weighted threshold"}
+        D -->|"score >= 0.85"| E["auto_block"]
+        D -->|"0.30 to 0.85"| F["hold_for_review"]
+        D -->|"score < 0.30"| G["auto_clear"]
+        E --> H["Claude verifier<br/>explain + bounded action"]
+        F --> H
+        G --> H
+        H --> I["FastAPI"]
+        I --> J["Dashboard<br/>feed + false-positive KPI"]
+        J -.->|"FP rate feeds threshold review"| D
+    end
+
+    subgraph OUT["Consumes the signal - deliberately out of scope"]
+        K["AFA / step-up engine<br/>RBI 2025 Section 8 decision"]
+        L["Network view<br/>cross-merchant ring detection"]
+    end
+
+    D -.->|"risk signal"| K
+    C -.->|"per-customer blind spot"| L
 
     style C fill:#0C2651,color:#fff
     style H fill:#0D94FB,color:#fff
-    style J fill:#F7F9FC,color:#0C2651
+    style K stroke-dasharray: 4 4
+    style L stroke-dasharray: 4 4
 ```
 
-The verifier is deliberately fenced in. It receives the transaction, its behavioural
-features, the model's probability, and **the action band that score falls into**. It may
-escalate caution (recommend `hold_for_review` where the band allows `auto_clear`) but it
-cannot recommend a less cautious action than the classifier's score permits. The LLM
-explains and advises; it does not get to overrule the model downward.
+Two boundaries in that diagram are load-bearing.
+
+**The verifier is fenced in.** It receives the transaction, its behavioural features, the
+model's probability, and **the action band that score falls into**. It may escalate caution
+(recommend `hold_for_review` where the band allows `auto_clear`) but it cannot recommend a
+less cautious action than the classifier's score permits. The LLM explains and advises; it
+does not get to overrule the model downward.
+
+**This system scores risk; it does not authenticate.** The dashed boxes are things that
+would consume this signal, not things built here — see the next section for why that
+distinction matters legally, and the limitations section for what the network blind spot
+actually costs.
 
 | Path | What |
 |---|---|
