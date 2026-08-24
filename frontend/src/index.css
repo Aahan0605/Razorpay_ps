@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy: #0C2651;
+  --color-navy-soft: #16396f;
+  --color-accent: #0D94FB;
+  --color-canvas: #F7F9FC;
+  --color-line: #E3E9F2;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --radius-card: 6px;
+}
+
+html { background: var(--color-canvas); }
+body { margin: 0; font-family: var(--font-sans); color: var(--color-navy); }
