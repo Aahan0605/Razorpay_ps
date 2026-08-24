@@ -30,7 +30,7 @@ flowchart TB
     subgraph BUILT["Built in this repo"]
         A["Transaction events"] --> B["Causal feature pipeline<br/>device / location / velocity / history"]
         B --> C["Gradient-boosted classifier"]
-        C --> D{"Cost-weighted threshold"}
+        C --> D{"Threshold + action bands"}
         D -->|"score >= 0.85"| E["auto_block"]
         D -->|"0.30 to 0.85"| F["hold_for_review"]
         D -->|"score < 0.30"| G["auto_clear"]
@@ -113,9 +113,12 @@ whole-dataset `groupby` is not merely optimistic on paper — it is unimplementa
 the data it depends on does not exist yet when the decision must be made. The leak test is
 what makes these features deployable rather than just accurate in a notebook.
 
-The cost-weighted threshold is the other half: a step-up decision needs a *graded* signal,
-not a binary flag, which is why the three bands exist. **This system supplies the risk
-signal that a compliant AFA engine would consume — it is not itself an AFA implementation.**
+The graded output is the other half: a step-up decision needs a *scored* signal, not a
+binary flag, which is why the three bands exist rather than one accept/reject line. (The
+threshold behind them is currently F1-optimal, not cost-weighted — see limitation 6, which
+is the single highest-value change left in this repo.) **This system supplies the risk
+signal that a compliant AFA engine would consume — it is not itself an AFA
+implementation.**
 
 ### 2. UPI is a push rail, so there is no chargeback to fall back on
 
@@ -279,20 +282,46 @@ base rate, ROC-AUC is the wrong headline metric — PR-AUC is the honest one.
 
 ### Honest limitations
 
+Ordered by how much they'd matter in production, not by how easy they are to admit.
+
 1. **The data is synthetic.** The model partly learns patterns I planted, so these numbers
    are optimistic versus real payment traffic. The mitigations above (overlapping
    distributions, careful fraudsters, unlearnable fraud, look-alike legitimate traffic)
    make it a fair test of the *pipeline*, not a prediction of production performance.
-2. **Validation F1 was 0.857, test F1 is 0.748.** That drop is genuine temporal drift and
+2. **No cross-merchant view — the ring blind spot from section 4.** Every velocity feature
+   is scoped to one customer at one merchant, so a ring spreading thin across many
+   merchants is invisible by construction. This is an architectural boundary, not a bug:
+   closing it requires network-level data this repo does not have.
+3. **No beneficiary-side signals, which is where UPI fraud actually lives.** The generator
+   models the payer side only. Real UPI fraud detection leans heavily on the *recipient*:
+   mule-account age, beneficiary inflow velocity, first-time-payee patterns, and the
+   freeze-window race after a report. None of that is modelled here, so the UPI framing in
+   section 2 is an argument about design priorities, not a demonstration of UPI-specific
+   detection.
+4. **Not an AFA implementation.** This produces a risk score. It performs no
+   authentication, implements no second factor, and makes no compliance claim under
+   RBI/2025-26/79. The value proposition is that it produces the *kind* of graded,
+   causally-computed signal Section 8 contemplates — the step-up engine itself is absent.
+5. **Validation F1 was 0.857, test F1 is 0.748.** That drop is genuine temporal drift and
    is exactly what a time-based split is supposed to expose. A random split would have
    hidden it.
-3. **The verifier is not evaluated.** Explanation quality is assessed by reading it, not
+6. **The threshold is F1-optimal, not cost-optimal.** Maximising F1 implicitly assumes a
+   false positive and a missed fraud cost the same amount. They do not — and on a push rail
+   with no chargeback, the asymmetry is severe and runs in a different direction than it
+   does on cards. A production threshold should minimise expected cost using real
+   per-outcome figures, which would move the operating point off 0.463. Everything needed
+   to do this is already in `models/metrics.json`; it needs the business's actual numbers,
+   which is why it is flagged rather than guessed.
+7. **The verifier is not evaluated.** Explanation quality is assessed by reading it, not
    by a metric. A proper eval would need labelled analyst judgements.
-4. **No calibration.** Scores are usable for ranking and banding; they are not calibrated
-   probabilities.
-5. **Feature attribution is implicit.** The verifier reasons over feature values rather
+8. **Feature attribution is implicit.** The verifier reasons over feature values rather
    than SHAP values, so its "key signals" are plausible rather than provably the model's
-   actual drivers. SHAP would close that gap.
+   actual drivers. SHAP would close that gap — and it matters more than it looks, because
+   an explanation shown to an analyst that is *not* the model's real reason is worse than
+   no explanation.
+9. **No calibration.** Scores are usable for ranking and banding; they are not calibrated
+   probabilities, so the band edges (0.30 / 0.85) are operating points rather than
+   statements about likelihood.
 
 ## Running it
 
