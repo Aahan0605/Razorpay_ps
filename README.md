@@ -3,8 +3,9 @@
 **Razorpay AI Builder Buildathon — Track 02: AI Risk Manager**
 
 A gradient-boosted classifier scores every payment transaction for fraud risk. Every
-flagged transaction is then passed to Claude, which explains the flag in plain language
-and recommends one **bounded** action: `auto_block`, `hold_for_review`, or `auto_clear`.
+flagged transaction is then passed to an LLM (Gemini 3.6 Flash), which explains the flag
+in plain language and recommends one **bounded** action: `auto_block`, `hold_for_review`,
+or `auto_clear`.
 
 The point of the second stage is that a fraud score is not an explanation. A risk analyst
 staring at `0.94` cannot tell a card-testing burst from a customer who bought a laptop
@@ -34,7 +35,7 @@ flowchart TB
         D -->|"score >= 0.85"| E["auto_block"]
         D -->|"0.30 to 0.85"| F["hold_for_review"]
         D -->|"score < 0.30"| G["auto_clear"]
-        E --> H["Claude verifier<br/>explain + bounded action"]
+        E --> H["LLM verifier<br/>explain + bounded action"]
         F --> H
         G --> H
         H --> I["FastAPI"]
@@ -81,7 +82,7 @@ actually costs.
 | `ml/features.py` | Causal feature engineering, shared by training and inference |
 | `ml/test_features.py` | Leak test: asserts prefix-computed features equal full-frame features |
 | `ml/train.py` | Temporal split, training, honest evaluation |
-| `backend/main.py` | FastAPI: scored feed + Claude verifier |
+| `backend/main.py` | FastAPI: scored feed + LLM verifier (Gemini) |
 | `frontend/` | React + Tailwind dashboard |
 
 ## Why this matters for Razorpay
@@ -343,11 +344,12 @@ Generate the data, verify causality, train, and print the evaluation:
 python ml/generate_data.py && python ml/test_features.py && python ml/train.py
 ```
 
-Add your Anthropic key — without it the API and dashboard still run, but `/verify`
-returns a clear 503 instead of an explanation:
+Add your Gemini key — without it the API and dashboard still run, but `/verify`
+returns a clear 503 instead of an explanation. Get a free-tier key (no card required)
+at [aistudio.google.com](https://aistudio.google.com):
 
 ```bash
-cp .env.example .env
+cp .env.example .env   # then paste your key into GEMINI_API_KEY=
 ```
 
 Backend:
@@ -369,7 +371,7 @@ Open http://localhost:5173.
 | Endpoint | Purpose |
 |---|---|
 | `GET /transactions?limit=&flagged_only=` | Scored feed, replayed from the held-out test set |
-| `POST /verify/{txn_id}` | Claude explanation + bounded action (cached per transaction) |
+| `POST /verify/{txn_id}` | LLM explanation + bounded action (cached per transaction) |
 | `GET /metrics` | Evaluation results behind the dashboard model card |
 
 The feed is the **test set**, not a random sample — every score shown is a genuine
